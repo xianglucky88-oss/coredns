@@ -29,8 +29,22 @@ type Signer struct {
 	stop       chan struct{}
 }
 
-// Sign signs a zone file according to the parameters in s.
+// Sign signs a zone file according to the parameters in s. The key pairs are
+// re-read from disk on every call and their optional lifecycle timing
+// (Publish, Activate, Inactive, Delete) decides which keys are published
+// (DNSKEY, CDS/CDNSKEY) and which keys sign (RRSIG). If the key files cannot
+// be read or no key is active an error is returned and the caller keeps the
+// previously signed zone untouched.
 func (s *Signer) Sign(now time.Time) (*file.Zone, error) {
+	pairs, err := s.reloadKeys()
+	if err != nil {
+		return nil, err
+	}
+	published, active, err := selectKeys(s.origin, pairs, now)
+	if err != nil {
+		return nil, err
+	}
+
 	rd, err := os.Open(s.dbfile)
 	if err != nil {
 		return nil, err
@@ -46,7 +60,7 @@ func (s *Signer) Sign(now time.Time) (*file.Zone, error) {
 	inception, expiration := lifetime(now, s.jitterIncep, s.jitterExpir)
 	z.SOA.Serial = uint32(now.Unix()) // #nosec G115 -- Unix time to SOA serial, Year 2106 problem accepted
 
-	for _, pair := range s.keys {
+	for _, pair := range published {
 		pair.Public.Header().Ttl = ttl // set TTL on key so it matches the RRSIG.
 		z.Insert(pair.Public)
 		z.Insert(pair.Public.ToDS(dns.SHA1).ToCDS())
@@ -57,7 +71,7 @@ func (s *Signer) Sign(now time.Time) (*file.Zone, error) {
 	names := names(s.origin, z)
 	ln := len(names)
 
-	for _, pair := range s.keys {
+	for _, pair := range active {
 		rrsig, err := pair.signRRs([]dns.RR{z.SOA}, s.origin, ttl, inception, expiration)
 		if err != nil {
 			return nil, err
@@ -94,7 +108,7 @@ func (s *Signer) Sign(now time.Time) (*file.Zone, error) {
 			if t == dns.TypeRRSIG || t == dns.TypeNS {
 				continue
 			}
-			for _, pair := range s.keys {
+			for _, pair := range active {
 				rrsig, err := pair.signRRs(rrs, s.origin, rrs[0].Header().Ttl, inception, expiration)
 				if err != nil {
 					return err

@@ -1,6 +1,7 @@
 package sign
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
@@ -23,6 +24,13 @@ type Pair struct {
 	Public  *dns.DNSKEY
 	KeyTag  uint16
 	Private crypto.Signer
+
+	// base is the filesystem path of the key pair without the .key/.private
+	// extension, so the pair can be re-read on every signing run.
+	base string
+	// timing holds the optional lifecycle metadata (Publish, Activate,
+	// Inactive, Delete) parsed from the BIND key files.
+	timing keyTiming
 }
 
 // keyParse reads the public and private key from disk.
@@ -56,6 +64,7 @@ func keyParse(c *caddy.Controller) ([]Pair, error) {
 			if err != nil {
 				return nil, err
 			}
+			pair.base = base
 			pairs = append(pairs, pair)
 		}
 	case "directory":
@@ -90,20 +99,44 @@ func readKeyPair(public, private string) (Pair, error) {
 	if err != nil {
 		return Pair{}, err
 	}
-	privkey, err := dnskey.(*dns.DNSKEY).ReadPrivateKey(rp, private)
+	pb, err := io.ReadAll(rp)
 	if err != nil {
 		return Pair{}, err
 	}
+	privkey, err := dnskey.(*dns.DNSKEY).ReadPrivateKey(bytes.NewReader(pb), private)
+	if err != nil {
+		return Pair{}, err
+	}
+	timing, err := parseKeyTiming(b, pb)
+	if err != nil {
+		return Pair{}, fmt.Errorf("key %q: %w", public, err)
+	}
 	switch signer := privkey.(type) {
 	case *ecdsa.PrivateKey:
-		return Pair{Public: dnskey.(*dns.DNSKEY), KeyTag: dnskey.(*dns.DNSKEY).KeyTag(), Private: signer}, nil
+		return Pair{Public: dnskey.(*dns.DNSKEY), KeyTag: dnskey.(*dns.DNSKEY).KeyTag(), Private: signer, timing: timing}, nil
 	case ed25519.PrivateKey:
-		return Pair{Public: dnskey.(*dns.DNSKEY), KeyTag: dnskey.(*dns.DNSKEY).KeyTag(), Private: signer}, nil
+		return Pair{Public: dnskey.(*dns.DNSKEY), KeyTag: dnskey.(*dns.DNSKEY).KeyTag(), Private: signer, timing: timing}, nil
 	case *rsa.PrivateKey:
-		return Pair{Public: dnskey.(*dns.DNSKEY), KeyTag: dnskey.(*dns.DNSKEY).KeyTag(), Private: signer}, nil
+		return Pair{Public: dnskey.(*dns.DNSKEY), KeyTag: dnskey.(*dns.DNSKEY).KeyTag(), Private: signer, timing: timing}, nil
 	default:
 		return Pair{}, fmt.Errorf("unsupported algorithm %s", signer)
 	}
+}
+
+// reloadKeys re-reads every configured key pair from disk. Lifecycle timing is
+// evaluated on every signing run and a temporarily unreadable key file makes
+// the signing run fail so the previous complete signed zone stays in place.
+func (s *Signer) reloadKeys() ([]Pair, error) {
+	pairs := make([]Pair, 0, len(s.keys))
+	for _, k := range s.keys {
+		p, err := readKeyPair(k.base+".key", k.base+".private")
+		if err != nil {
+			return nil, fmt.Errorf("failed to read key pair %q: %w", k.base, err)
+		}
+		p.Public.Header().Name = s.origin
+		pairs = append(pairs, p)
+	}
+	return pairs, nil
 }
 
 // keyTag returns the key tags of the keys in ps as a formatted string.

@@ -18,7 +18,8 @@ files, *auto* and *file* **serve** the zones *data*.
 
 For this plugin to work at least one Common Signing Key, (see coredns-keygen(1)) is needed. This key
 (or keys) will be used to sign the entire zone. *Sign* does *not* support the ZSK/KSK split, nor will
-it do key or algorithm rollovers - it just signs.
+it do algorithm rollovers. Key rollovers can be driven by the BIND key lifecycle timing, see
+*Key Lifecycle* below.
 
 *Sign* will:
 
@@ -70,12 +71,39 @@ sign DBFILE [ZONES...] {
    used.
 * `key` specifies the key(s) (there can be multiple) to sign the zone. If `file` is
    used the **KEY**'s filenames are used as is. If `directory` is used, *sign* will look in **DIR**
-   for `K<name>+<alg>+<id>` files. Any metadata in these files (Activate, Publish, etc.) is
-   *ignored*. These keys must also be Key Signing Keys (KSK).
+   for `K<name>+<alg>+<id>` files. The optional BIND lifecycle metadata in these files (Publish,
+   Activate, Inactive, Delete) is honored when present, see *Key Lifecycle* below. These keys must
+   also be Key Signing Keys (KSK).
 *  `directory` specifies the **DIR** where CoreDNS should save zones that have been signed.
    If not given this defaults to `/var/lib/coredns`. The zones are saved under the name
    `db.<name>.signed`. If the path is relative the path from the *root* plugin will be prepended
    to it.
+
+## Key Lifecycle
+
+A key pair may carry BIND9 lifecycle timing, written by `dnssec-keygen`/`dnssec-settime`. In the
+`.key` file the timing is found in `;`-comment lines, in the `.private` file as plain
+`Field: value` lines; both files are read on every signing run and must agree (the `.private`
+value wins). The supported fields use absolute `YYYYMMDDHHMMSS` (or `YYYYMMDD`) times:
+
+* **Publish**: from this time the DNSKEY and its CDS/CDNSKEY records are added to the zone. Before
+  it, the key stays hidden.
+* **Activate**: from this time the key starts generating RRSIGs.
+* **Inactive**: from this time the key stops generating RRSIGs, but the DNSKEY (and CDS/CDNSKEY)
+  stay published so existing signatures can still validate.
+* **Delete**: from this time the key (and its CDS/CDNSKEY) is removed from the zone.
+
+Missing fields impose no constraint, so a key with only *Activate* set signs from that time on,
+and a key with no lifecycle fields at all is always published and signs, exactly as in previous
+releases. Multiple keys can therefore be published or sign in parallel during a rollover, and
+because every decision is derived from the absolute times in the key files, restarting CoreDNS
+converges on the same timeline.
+
+If no key is allowed to sign at the current time (for instance a new key has not reached
+*Activate* yet, or the old key already passed *Delete*), or a configured key file cannot be read,
+*sign* refuses to produce a partial or mixed-generation zone and keeps the previous complete
+signed zone file in place; serving continues from the last good result and signing is retried on
+the next refresh cycle.
 
 Keys can be generated with `coredns-keygen`, to create one for use in the *sign* plugin, use:
 `coredns-keygen example.org` or `dnssec-keygen -a ECDSAP256SHA256 -f KSK example.org`.
