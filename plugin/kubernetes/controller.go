@@ -130,6 +130,12 @@ type dnsControlOpts struct {
 	zones             []string
 	endpointNameMode  bool
 	multiclusterZones []string
+	// clusterPreference is the optional, ordered list of multicluster
+	// cluster IDs used to narrow endpoint enumeration in multicluster zones.
+	// Earlier entries win; a cluster is skipped while it has no endpoints
+	// that can answer the query. Empty preserves the default behavior of
+	// returning every cluster's endpoints.
+	clusterPreference []string
 }
 
 // newdnsController creates a controller for CoreDNS.

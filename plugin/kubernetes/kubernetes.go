@@ -658,8 +658,19 @@ func (k *Kubernetes) findMultiClusterServices(r recordRequest, zone string) (ser
 				endpointsList = endpointsListFunc()
 			}
 
+			// With a cluster preference, enumerate only the highest-priority
+			// cluster that can answer this query. An empty selection means no
+			// narrowing: the preference is unset, the name pins a cluster
+			// selector (whose semantics stay untouched), or no cluster has
+			// usable endpoints — in which case the unfiltered loop reaches
+			// the same empty result as without the option.
+			selectedCluster := k.preferredMultiClusterCluster(r, endpointsList)
+
 			for _, ep := range endpointsList {
 				if object.MultiClusterEndpointsKey(svc.Name, svc.Namespace) != ep.Index {
+					continue
+				}
+				if selectedCluster != "" && !match(selectedCluster, ep.ClusterId) {
 					continue
 				}
 
@@ -705,6 +716,91 @@ func (k *Kubernetes) findMultiClusterServices(r recordRequest, zone string) (ser
 		}
 	}
 	return services, err
+}
+
+// preferredMultiClusterCluster selects the single cluster whose multicluster
+// endpoints may be enumerated for r, or "" when no narrowing applies.
+//
+// Narrowing runs only with a configured cluster preference and for queries
+// that do not pin a cluster ID in the name (r.cluster == ""); an explicit
+// cluster selector keeps its exact, existing semantics.
+//
+// Preference entries are tried in configuration order. Clusters absent from
+// the preference stay reachable as a deterministic fallback tier ordered by
+// cluster ID, so a partial preference can never blackhole a healthy cluster.
+// The choice is computed from the informer cache observed at query time, with
+// no cached selection, so ServiceImport/EndpointSlice mutations, transiently
+// absent clusters and informer resyncs all converge to the same cluster ID
+// for the same observed state.
+func (k *Kubernetes) preferredMultiClusterCluster(r recordRequest, endpointsList []*object.MultiClusterEndpoints) string {
+	if len(k.opts.clusterPreference) == 0 || r.cluster != "" {
+		return ""
+	}
+
+	// eligible maps a lowercased cluster ID to the spelling observed on the
+	// EndpointSlice label: comparisons stay case-insensitive while the
+	// returned ID keeps the cache's canonical form.
+	eligible := map[string]string{}
+	for _, ep := range endpointsList {
+		if ep == nil || object.MultiClusterEndpointsKey(r.service, r.namespace) != ep.Index {
+			continue
+		}
+		key := strings.ToLower(ep.ClusterId)
+		if _, ok := eligible[key]; ok {
+			continue
+		}
+		if k.multiClusterEndpointMatches(ep, r) {
+			eligible[key] = ep.ClusterId
+		}
+	}
+	if len(eligible) == 0 {
+		return ""
+	}
+
+	preferred := make(map[string]struct{}, len(k.opts.clusterPreference))
+	for _, id := range k.opts.clusterPreference {
+		key := strings.ToLower(id)
+		preferred[key] = struct{}{}
+		if observed, ok := eligible[key]; ok {
+			return observed
+		}
+	}
+
+	// Fallback tier: clusters the preference does not name, in stable
+	// cluster-ID order, keep the service reachable when every preferred
+	// cluster is currently drained.
+	rest := make([]string, 0, len(eligible))
+	for key := range eligible {
+		if _, ok := preferred[key]; !ok {
+			rest = append(rest, key)
+		}
+	}
+	slices.Sort(rest)
+	if len(rest) == 0 {
+		return ""
+	}
+	return eligible[rest[0]]
+}
+
+// multiClusterEndpointMatches reports whether ep contains at least one
+// address/port pair satisfying the query's endpoint, port and protocol
+// filters. It mirrors the per-record filters in findMultiClusterServices,
+// minus the cluster selector: preference only runs for queries without a
+// pinned cluster.
+func (k *Kubernetes) multiClusterEndpointMatches(ep *object.MultiClusterEndpoints, r recordRequest) bool {
+	for _, eps := range ep.Subsets {
+		for _, addr := range eps.Addresses {
+			if r.endpoint != "" && !match(r.endpoint, endpointHostname(addr, k.endpointNameMode)) {
+				continue
+			}
+			for _, p := range eps.Ports {
+				if matchPortAndProtocol(r.port, p.Name, r.protocol, p.Protocol) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // Serial return the SOA serial.

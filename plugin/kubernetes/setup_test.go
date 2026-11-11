@@ -734,6 +734,100 @@ func TestKubernetesParseMulticluster(t *testing.T) {
 	}
 }
 
+func TestKubernetesParseClusterPreference(t *testing.T) {
+	tests := []struct {
+		input              string
+		shouldErr          bool
+		expectedErrContent string
+		expectedPreference []string
+	}{
+		// valid: ordered cluster IDs inside a multicluster zone
+		{
+			`kubernetes coredns.local clusterset.local {
+	multicluster clusterset.local
+	cluster_preference cluster-east cluster-west
+}`,
+			false,
+			"",
+			[]string{"cluster-east", "cluster-west"},
+		},
+		// valid: repeated directives append in order
+		{
+			`kubernetes coredns.local clusterset.local {
+	multicluster clusterset.local
+	cluster_preference cluster-east
+	cluster_preference cluster-west
+}`,
+			false,
+			"",
+			[]string{"cluster-east", "cluster-west"},
+		},
+		// invalid: no cluster IDs
+		{
+			`kubernetes coredns.local clusterset.local {
+	multicluster clusterset.local
+	cluster_preference
+}`,
+			true,
+			"Wrong argument count",
+			nil,
+		},
+		// invalid: requires a multicluster zone
+		{
+			`kubernetes coredns.local {
+	cluster_preference cluster-east
+}`,
+			true,
+			"cluster_preference requires a multicluster zone",
+			nil,
+		},
+		// invalid: duplicate cluster IDs
+		{
+			`kubernetes coredns.local clusterset.local {
+	multicluster clusterset.local
+	cluster_preference cluster-east cluster-west cluster-east
+}`,
+			true,
+			"lists cluster \"cluster-east\" more than once",
+			nil,
+		},
+		// invalid: duplicate cluster IDs differing only in case
+		{
+			`kubernetes coredns.local clusterset.local {
+	multicluster clusterset.local
+	cluster_preference Cluster-East cluster-east
+}`,
+			true,
+			"more than once",
+			nil,
+		},
+	}
+
+	for i, test := range tests {
+		c := caddy.NewTestController("dns", test.input)
+		k8sController, err := kubernetesParse(c)
+
+		if test.shouldErr && err == nil {
+			t.Errorf("Test %d: Expected error, but did not find error for input '%s'.", i, test.input)
+			continue
+		}
+		if err != nil {
+			if !test.shouldErr {
+				t.Errorf("Test %d: Expected no error but found one for input %s. Error was: %v", i, test.input, err)
+				continue
+			}
+			if !strings.Contains(err.Error(), test.expectedErrContent) {
+				t.Errorf("Test %d: Expected error to contain %q, found error: %v, input: %s", i, test.expectedErrContent, err, test.input)
+			}
+			continue
+		}
+
+		if !slices.Equal(k8sController.opts.clusterPreference, test.expectedPreference) {
+			t.Errorf("Test %d: Expected cluster preference %v, got %v for input %s", i, test.expectedPreference, k8sController.opts.clusterPreference, test.input)
+		}
+	}
+}
+
 func TestKubernetesParseAPIRateLimiting(t *testing.T) {
 	tests := []struct {
 		input              string

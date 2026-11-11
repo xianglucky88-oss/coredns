@@ -46,6 +46,7 @@ kubernetes [ZONES...] {
     fallthrough [ZONES...]
     ignore empty_service
     multicluster [ZONES...]
+    cluster_preference CLUSTER [CLUSTER...]
     zonal
     startup_timeout DURATION
 }
@@ -119,6 +120,18 @@ kubernetes [ZONES...] {
   Services API (MCS-API). Specifying this option is generally paired with the
   installation of an MCS-API implementation and the ServiceImport and ServiceExport
   CRDs. The plugin MUST be authoritative for the zones listed here.
+* `cluster_preference` **CLUSTER [CLUSTER...]** defines an optional, ordered
+  preference of multicluster cluster IDs and only takes effect inside
+  `multicluster` zones. For a ServiceImport, service name (A/AAAA), SRV and
+  endpoint enumeration return only the endpoints of the highest-priority
+  cluster that currently has ready EndpointSlice endpoints; the next cluster
+  in the list is used only when every higher-priority cluster has no usable
+  endpoints in the observed state. Clusters not listed here stay reachable as
+  a stable, cluster-ID ordered fallback, so a partial preference never
+  blackholes a healthy cluster. A cluster ID pinned explicitly in the query
+  name keeps its exact selector semantics, and without this option every
+  cluster's endpoints are returned exactly as before. Each cluster ID may be
+  listed once; the option requires a `multicluster` zone.
 * `zonal` enables zone-scoped names for headless services (see the Zonal
   Names section below). It also publishes the `kubernetes/zone` metadata
   label (the requested topology zone, empty for non-zonal queries) when the
@@ -279,6 +292,34 @@ kubernetes cluster.local clusterset.local {
     multicluster clusterset.local
 }
 ~~~
+
+### Multicluster Cluster Preference
+
+By default a headless ServiceImport enumerates the endpoints of every member
+cluster, in informer order. With `cluster_preference` the answer is narrowed
+to one cluster: the earliest listed cluster ID whose EndpointSlices currently
+carry ready endpoints for the query. Selection is recomputed per query from
+the informer cache, so EndpointSlice/ServiceImport adds, updates and deletes
+(including a cluster that disappears temporarily and an informer resync)
+converge deterministically — there is no sticky choice to go stale.
+
+~~~ txt
+kubernetes cluster.local clusterset.local {
+    multicluster clusterset.local
+    cluster_preference cluster-east cluster-west
+}
+~~~
+
+With this configuration, `headless.testns.svc.clusterset.local` answers from
+`cluster-east` while it has ready endpoints; once `cluster-east` has none, the
+same name answers from `cluster-west`; if neither preferred cluster can
+answer, any other cluster serving the ServiceImport is used, ordered by
+cluster ID. SRV queries and their glue records are narrowed in the same way
+because the selection happens at endpoint lookup. An explicitly pinned name
+such as `ep1.cluster-west.headless.testns.svc.clusterset.local` always
+consults `cluster-west`, regardless of the preference order, and ClusterSetIP
+(ClusterSet VIP) records are not per-cluster and are unaffected. Omitting the
+option restores the default behavior of returning every cluster's endpoints.
 
 ## stubDomains and upstreamNameservers
 

@@ -238,6 +238,12 @@ func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
 			k8s.ClientConfig = config
 		case "multicluster":
 			k8s.opts.multiclusterZones = plugin.OriginsFromArgsOrServerBlock(c.RemainingArgs(), []string{})
+		case "cluster_preference":
+			args := c.RemainingArgs()
+			if len(args) == 0 {
+				return nil, c.ArgErr()
+			}
+			k8s.opts.clusterPreference = append(k8s.opts.clusterPreference, args...)
 		case "startup_timeout":
 			args := c.RemainingArgs()
 			if len(args) == 0 {
@@ -299,6 +305,20 @@ func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
 	for _, multiclusterZone := range k8s.opts.multiclusterZones {
 		if !slices.Contains(k8s.Zones, multiclusterZone) {
 			return nil, c.Errf("is not authoritative for the multicluster zone %s (authoritative zones: %v)", multiclusterZone, k8s.Zones)
+		}
+	}
+
+	if len(k8s.opts.clusterPreference) > 0 {
+		if len(k8s.opts.multiclusterZones) == 0 {
+			return nil, c.Errf("cluster_preference requires a multicluster zone; configure the multicluster option first")
+		}
+		seen := make(map[string]struct{}, len(k8s.opts.clusterPreference))
+		for _, clusterID := range k8s.opts.clusterPreference {
+			key := strings.ToLower(clusterID)
+			if _, ok := seen[key]; ok {
+				return nil, c.Errf("cluster_preference lists cluster %q more than once; each cluster ID may appear once", clusterID)
+			}
+			seen[key] = struct{}{}
 		}
 	}
 
